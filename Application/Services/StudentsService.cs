@@ -77,6 +77,15 @@ namespace Application.Services
 
         public async Task<ServiceResult<Student>> CreateAsync(Student student)
         {
+            if (student.DateOfBirth.HasValue &&
+                student.EnrollDate.HasValue &&
+                student.EnrollDate.Value.Date < student.DateOfBirth.Value.Date)
+            {
+                return ServiceResult<Student>.Fail(
+                    ServiceError.Validation(
+                        "Enrollment date cannot be earlier than date of birth."));
+            }
+
             var code = student.Code.Trim();
 
             var codeTaken = await _db.Students
@@ -102,6 +111,15 @@ namespace Application.Services
             var student = await _db.Students.FindAsync(id);
             if (student == null)
                 return ServiceResult.Fail(ServiceError.NotFound());
+
+            if (updated.DateOfBirth.HasValue &&
+                updated.EnrollDate.HasValue &&
+                updated.EnrollDate.Value.Date < updated.DateOfBirth.Value.Date)
+            {
+                return ServiceResult.Fail(
+                    ServiceError.Validation(
+                        "Enrollment date cannot be earlier than date of birth."));
+            }
 
             var code = updated.Code.Trim();
 
