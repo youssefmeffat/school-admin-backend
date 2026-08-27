@@ -75,11 +75,26 @@ namespace Application.Services
             return ServiceResult<StudentSummaryDto>.Success(student);
         }
 
-        public async Task<Student> CreateAsync(Student student)
+        public async Task<ServiceResult<Student>> CreateAsync(Student student)
         {
+            var code = student.Code.Trim();
+
+            var codeTaken = await _db.Students
+                .AnyAsync(s => s.Code == code);
+
+            if (codeTaken)
+            {
+                return ServiceResult<Student>.Fail(
+                    ServiceError.Validation(
+                        "Student code is already in use."));
+            }
+
+            student.Code = code;
+
             _db.Students.Add(student);
             await _db.SaveChangesAsync();
-            return student;
+
+            return ServiceResult<Student>.Success(student);
         }
 
         public async Task<ServiceResult> UpdateAsync(int id, Student updated)
@@ -88,11 +103,26 @@ namespace Application.Services
             if (student == null)
                 return ServiceResult.Fail(ServiceError.NotFound());
 
+            var code = updated.Code.Trim();
+
+            var codeTaken = await _db.Students
+                .AnyAsync(s =>
+                    s.Id != id &&
+                    s.Code == code);
+
+            if (codeTaken)
+            {
+                return ServiceResult.Fail(
+                    ServiceError.Validation(
+                        "Student code is already in use."));
+            }
+
             student.FullName = updated.FullName;
-            student.Code = updated.Code;
+            student.Code = code;
             student.DateOfBirth = updated.DateOfBirth;
             student.EnrollDate = updated.EnrollDate;
             student.ClassId = updated.ClassId;
+
             await _db.SaveChangesAsync();
             return ServiceResult.Success();
         }
