@@ -39,14 +39,23 @@ namespace Api.Controllers
         [ProducesResponseType(StatusCodes.Status400BadRequest)]
         public async Task<IActionResult> Create([FromBody] SubjectCreateDto dto)
         {
-            if (!ModelState.IsValid) return BadRequest(ModelState);
+            if (!ModelState.IsValid)
+                return BadRequest(ModelState);
 
-            var subject = await _subjects.CreateAsync(dto);
-            return CreatedAtAction(nameof(Get), new { id = subject.Id }, subject);
+            var result = await _subjects.CreateAsync(dto);
+
+            if (!result.Succeeded)
+                return result.Error!.ToActionResult();
+
+            return CreatedAtAction(
+                nameof(Get),
+                new { id = result.Value!.Id },
+                result.Value);
         }
 
         [HttpPut("{id:int}")]
         [ProducesResponseType(StatusCodes.Status204NoContent)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
         [ProducesResponseType(StatusCodes.Status404NotFound)]
         public async Task<IActionResult> Update(int id, [FromBody] SubjectCreateDto dto)
         {
