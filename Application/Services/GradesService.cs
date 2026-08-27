@@ -79,6 +79,14 @@ namespace Application.Services
         public async Task<ServiceResult<Grade>> CreateAsync(Grade grade)
         {
             var name = grade.Name.Trim();
+
+            if (name.Length > 10)
+            {
+                return ServiceResult<Grade>.Fail(
+                    ServiceError.Validation(
+                        "Grade name cannot be more than 10 characters."));
+            }
+
             var normalizedName = name.ToLower();
 
             var nameTaken = await _db.Grades
@@ -106,6 +114,14 @@ namespace Application.Services
                 return ServiceResult.Fail(ServiceError.NotFound());
 
             var name = updated.Name.Trim();
+
+            if (name.Length > 10)
+            {
+                return ServiceResult.Fail(
+                    ServiceError.Validation(
+                        "Grade name cannot be more than 10 characters."));
+            }
+
             var normalizedName = name.ToLower();
 
             var nameTaken = await _db.Grades
