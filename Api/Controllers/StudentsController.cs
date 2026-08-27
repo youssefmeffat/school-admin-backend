@@ -39,10 +39,18 @@ namespace Api.Controllers
 
         [HttpPost]
         [ProducesResponseType(typeof(Student), StatusCodes.Status201Created)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
         public async Task<IActionResult> Create([FromBody] Student student)
         {
-            var created = await _students.CreateAsync(student);
-            return CreatedAtAction(nameof(Get), new { id = created.Id }, created);
+            var result = await _students.CreateAsync(student);
+
+            if (!result.Succeeded)
+                return result.Error!.ToActionResult();
+
+            return CreatedAtAction(
+                nameof(Get),
+                new { id = result.Value!.Id },
+                result.Value);
         }
 
         [HttpPut("{id:int}")]

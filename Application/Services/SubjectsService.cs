@@ -37,12 +37,43 @@ namespace Application.Services
             return ServiceResult<SubjectDto>.Success(new SubjectDto { Id = s.Id, Name = s.Name });
         }
 
-        public async Task<SubjectDto> CreateAsync(SubjectCreateDto dto)
+        public async Task<ServiceResult<SubjectDto>> CreateAsync(SubjectCreateDto dto)
         {
-            var subject = new Core.Models.Subject { Name = dto.Name };
+            var name = dto.Name.Trim();
+
+            if (name.Length > 25)
+            {
+                return ServiceResult<SubjectDto>.Fail(
+                    ServiceError.Validation(
+                        "Subject name cannot be more than 25 characters."));
+            }
+
+            var normalizedName = name.ToLower();
+
+            var nameTaken = await _db.Subjects
+                .AnyAsync(s => s.Name.ToLower() == normalizedName);
+
+            if (nameTaken)
+            {
+                return ServiceResult<SubjectDto>.Fail(
+                    ServiceError.Validation(
+                        "A subject with this name already exists."));
+            }
+
+            var subject = new Core.Models.Subject
+            {
+                Name = name
+            };
+
             _db.Subjects.Add(subject);
             await _db.SaveChangesAsync();
-            return new SubjectDto { Id = subject.Id, Name = subject.Name };
+
+            return ServiceResult<SubjectDto>.Success(
+                new SubjectDto
+                {
+                    Id = subject.Id,
+                    Name = subject.Name
+                });
         }
 
         public async Task<ServiceResult> UpdateAsync(int id, SubjectCreateDto dto)
@@ -51,7 +82,31 @@ namespace Application.Services
             if (s == null)
                 return ServiceResult.Fail(ServiceError.NotFound());
 
-            s.Name = dto.Name;
+            var name = dto.Name.Trim();
+
+            if (name.Length > 25)
+            {
+                return ServiceResult.Fail(
+                    ServiceError.Validation(
+                        "Subject name cannot be more than 25 characters."));
+            }
+
+            var normalizedName = name.ToLower();
+
+            var nameTaken = await _db.Subjects
+                .AnyAsync(subject =>
+                    subject.Id != id &&
+                    subject.Name.ToLower() == normalizedName);
+
+            if (nameTaken)
+            {
+                return ServiceResult.Fail(
+                    ServiceError.Validation(
+                        "A subject with this name already exists."));
+            }
+
+            s.Name = name;
+
             await _db.SaveChangesAsync();
             return ServiceResult.Success();
         }

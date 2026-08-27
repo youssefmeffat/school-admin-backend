@@ -45,17 +45,21 @@ namespace Api.Controllers
             if (!ModelState.IsValid)
                 return BadRequest(ModelState);
 
-            var created = await _grades.CreateAsync(grade);
+            var result = await _grades.CreateAsync(grade);
+
+            if (!result.Succeeded)
+                return result.Error!.ToActionResult();
 
             return CreatedAtAction(
                 nameof(Get),
-                new { id = created.Id },
-                created
+                new { id = result.Value!.Id },
+                result.Value
             );
         }
 
         [HttpPut("{id:int}")]
         [ProducesResponseType(StatusCodes.Status204NoContent)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
         [ProducesResponseType(StatusCodes.Status404NotFound)]
         public async Task<IActionResult> Update(int id, [FromBody] Grade updated)
         {

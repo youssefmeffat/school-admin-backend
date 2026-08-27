@@ -76,11 +76,35 @@ namespace Application.Services
             return ServiceResult<GradeLevelDto>.Success(grade);
         }
 
-        public async Task<Grade> CreateAsync(Grade grade)
+        public async Task<ServiceResult<Grade>> CreateAsync(Grade grade)
         {
+            var name = grade.Name.Trim();
+
+            if (name.Length > 10)
+            {
+                return ServiceResult<Grade>.Fail(
+                    ServiceError.Validation(
+                        "Grade name cannot be more than 10 characters."));
+            }
+
+            var normalizedName = name.ToLower();
+
+            var nameTaken = await _db.Grades
+                .AnyAsync(g => g.Name.ToLower() == normalizedName);
+
+            if (nameTaken)
+            {
+                return ServiceResult<Grade>.Fail(
+                    ServiceError.Validation(
+                        "A grade with this name already exists."));
+            }
+
+            grade.Name = name;
+
             _db.Grades.Add(grade);
             await _db.SaveChangesAsync();
-            return grade;
+
+            return ServiceResult<Grade>.Success(grade);
         }
 
         public async Task<ServiceResult> UpdateAsync(int id, Grade updated)
@@ -89,7 +113,30 @@ namespace Application.Services
             if (grade == null)
                 return ServiceResult.Fail(ServiceError.NotFound());
 
-            grade.Name = updated.Name;
+            var name = updated.Name.Trim();
+
+            if (name.Length > 10)
+            {
+                return ServiceResult.Fail(
+                    ServiceError.Validation(
+                        "Grade name cannot be more than 10 characters."));
+            }
+
+            var normalizedName = name.ToLower();
+
+            var nameTaken = await _db.Grades
+                .AnyAsync(g =>
+                    g.Id != id &&
+                    g.Name.ToLower() == normalizedName);
+
+            if (nameTaken)
+            {
+                return ServiceResult.Fail(
+                    ServiceError.Validation(
+                        "A grade with this name already exists."));
+            }
+
+            grade.Name = name;
             grade.Number = updated.Number;
             grade.Description = updated.Description;
 

@@ -105,6 +105,14 @@ namespace Application.Services
 
         public async Task<ServiceResult<ExamDto>> CreateAsync(ExamCreateDto dto)
         {
+            if (dto.ExamDate.HasValue &&
+                dto.ExamDate.Value.Date < DateTime.Today)
+            {
+                return ServiceResult<ExamDto>.Fail(
+                    ServiceError.Validation(
+                        "Exam date cannot be in the past."));
+            }
+
             var subjectExists = await _db.Subjects.AnyAsync(s => s.Id == dto.SubjectId);
             if (!subjectExists)
                 return ServiceResult<ExamDto>.Fail(ServiceError.Validation("Subject does not exist."));
@@ -151,6 +159,14 @@ namespace Application.Services
             if (exam == null)
                 return ServiceResult.Fail(ServiceError.NotFound());
 
+            if (dto.ExamDate.HasValue &&
+                dto.ExamDate.Value.Date < DateTime.Today)
+            {
+                return ServiceResult.Fail(
+                    ServiceError.Validation(
+                        "Exam date cannot be in the past."));
+            }
+
             var subjectExists = await _db.Subjects.AnyAsync(s => s.Id == dto.SubjectId);
             if (!subjectExists)
                 return ServiceResult.Fail(ServiceError.Validation("Subject does not exist."));
@@ -182,7 +198,7 @@ namespace Application.Services
             if (examDate == null)
                 return "Unscheduled";
 
-            return examDate.Value < DateTime.UtcNow
+            return examDate.Value.Date < DateTime.Today
                 ? "Completed"
                 : "Scheduled";
         }

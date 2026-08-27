@@ -7,7 +7,7 @@ namespace Application.Services
     {
         Task<PagedResult<SubjectDto>> GetAllAsync(PaginationParams pagination);
         Task<ServiceResult<SubjectDto>> GetAsync(int id);
-        Task<SubjectDto> CreateAsync(SubjectCreateDto dto);
+        Task<ServiceResult<SubjectDto>> CreateAsync(SubjectCreateDto dto);
         Task<ServiceResult> UpdateAsync(int id, SubjectCreateDto dto);
         Task<ServiceResult> DeleteAsync(int id);
     }

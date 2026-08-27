@@ -8,7 +8,7 @@ namespace Application.Services
     {
         Task<PagedResult<GradeLevelDto>> GetAllAsync(PaginationParams pagination, string? search = null);
         Task<ServiceResult<GradeLevelDto>> GetAsync(int id);
-        Task<Grade> CreateAsync(Grade grade);
+        Task<ServiceResult<Grade>> CreateAsync(Grade grade);
         Task<ServiceResult> UpdateAsync(int id, Grade updated);
         Task<ServiceResult> DeleteAsync(int id);
     }

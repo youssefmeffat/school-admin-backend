@@ -500,6 +500,56 @@ namespace Infrastructure.Data
                 db.Exams.AddRange(exams);
                 await db.SaveChangesAsync();
             }
+            else
+            {
+                // Existing databases:
+                // assign a deterministic mixture of statuses to rows
+                // that were created before the Status column existed.
+                //
+                // The exam date is also kept consistent with the stored
+                // status so seeded development data does not contradict
+                // itself.
+                var rnd = new Random(54321);
+
+                var orderedExams = exams
+                    .OrderBy(e => e.Id)
+                    .ToList();
+
+                for (int i = 0; i < orderedExams.Count; i++)
+                {
+                    var exam = orderedExams[i];
+
+                    switch (i % 3)
+                    {
+                        case 0:
+                            exam.Status = "Unscheduled";
+                            exam.ExamDate = null;
+                            break;
+
+                        case 1:
+                            exam.Status = "Scheduled";
+                            exam.ExamDate = DateTime.UtcNow.AddDays(
+                                rnd.Next(7, 60)
+                            );
+                            break;
+
+                        default:
+                            exam.Status = "Completed";
+                            exam.ExamDate = DateTime.UtcNow.AddDays(
+                                -rnd.Next(1, 60)
+                            );
+                            break;
+                    }
+                }
+
+                await db.SaveChangesAsync();
+
+                // Refresh the list so later seeding logic uses the
+                // updated status/date values.
+                exams = await db.Exams
+                    .Include(e => e.Grade)
+                    .ToListAsync();
+            }
 
             // ---------------------------------------------------------
             // Student exam results
