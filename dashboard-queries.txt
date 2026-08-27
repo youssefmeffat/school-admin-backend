@@ -1,0 +1,638 @@
+SCHOOL DASHBOARD - MYSQL REFERENCE QUERIES
+===========================================
+
+Based on the current implementation (Infrastructure/Migrations, SchoolDbContext.cs,
+Application/Services/DashboardService.cs and AttendanceService.cs).
+
+Notes that apply across all queries below:
+- "Level" (as used in the ERD) = the `Grades` table in this schema.
+- AttendanceStatus enum values (Core.Enums.AttendanceStatus):
+    0 = Unrecorded, 1 = Present, 2 = Absent, 3 = Late, 4 = Excused
+- Queries using WITH RECURSIVE require MySQL 8.0+ (or MariaDB 10.2+).
+- Table names: Grades, Classes, Students, Teachers, Subjects, Exams,
+  StudentExamResults, GradeSubjects, TeacherSubjectGrades, TeachingAssignments,
+  StudentAttendances, TeacherAttendances, Schools.
+
+
+-----------------------------------------------------------------------------
+1. DASHBOARD SUMMARY STAT CARDS
+-----------------------------------------------------------------------------
+Description:
+Single-row snapshot of the top numbers shown on the dashboard: total
+students, total teachers, total classes, total subjects, and how many
+exams are scheduled in the next 7 days. Mirrors the "TOP STAT CARDS"
+block of DashboardService.GetStatsAsync().
+
+SELECT
+    (SELECT COUNT(*) FROM Students)                           AS totalStudents,
+    (SELECT COUNT(*) FROM Teachers)                           AS totalTeachers,
+    (SELECT COUNT(*) FROM Classes)                            AS totalClasses,
+    (SELECT COUNT(*) FROM Exams
+       WHERE ExamDate IS NOT NULL
+         AND DATE(ExamDate) >= CURDATE()
+         AND DATE(ExamDate) <  CURDATE() + INTERVAL 7 DAY)    AS examsThisWeek,
+    (SELECT COUNT(*) FROM Subjects)                           AS totalSubjects;
+
+
+-----------------------------------------------------------------------------
+2. STUDENT ENROLLMENT BY GRADE LEVEL
+-----------------------------------------------------------------------------
+Description:
+Number of enrolled students per grade level, ordered by grade number.
+Useful for an enrollment-by-level bar/pie chart on the dashboard.
+
+SELECT
+    g.Id                 AS id,
+    g.Name               AS name,
+    g.Number             AS number,
+    COUNT(s.Id)          AS studentCount
+FROM Grades g
+LEFT JOIN Classes  c ON c.GradeId = g.Id
+LEFT JOIN Students s ON s.ClassId = c.Id
+GROUP BY g.Id, g.Name, g.Number
+ORDER BY g.Number;
+
+
+-----------------------------------------------------------------------------
+3. STUDENT COUNT PER CLASS
+-----------------------------------------------------------------------------
+Description:
+Enrolled student count for every class, grouped under its grade. Useful
+for a "class capacity" table or chart, and for spotting over/under
+enrolled classes at a glance.
+
+SELECT
+    c.Id                  AS id,
+    c.Name                AS name,
+    c.GradeId             AS gradeId,
+    g.Name                AS gradeName,
+    COUNT(s.Id)           AS studentCount
+FROM Classes c
+JOIN Grades g   ON g.Id = c.GradeId
+LEFT JOIN Students s ON s.ClassId = c.Id
+GROUP BY c.Id, c.Name, c.GradeId, g.Name, g.Number
+ORDER BY g.Number, c.Name;
+
+
+-----------------------------------------------------------------------------
+4. AVERAGE EXAM SCORE (%) BY GRADE + SUBJECT
+-----------------------------------------------------------------------------
+Description:
+Average score, as a percentage of MaxScore, for every grade/subject
+combination that has been assigned via GradeSubjects. Only counts exam
+results that have a recorded score and a positive MaxScore, matching the
+app's own filtering rule. Powers the "average score by subject" chart.
+
+SELECT
+    gs.GradeId                                   AS gradeId,
+    gs.SubjectId                                 AS subjectId,
+    sub.Name                                     AS subjectName,
+    g.Name                                       AS gradeName,
+    AVG((ser.Score / e.MaxScore) * 100)          AS averageScore
+FROM GradeSubjects gs
+JOIN Grades   g   ON g.Id = gs.GradeId
+JOIN Subjects sub ON sub.Id = gs.SubjectId
+LEFT JOIN Exams e
+       ON e.SubjectId = gs.SubjectId
+      AND e.GradeId   = gs.GradeId
+LEFT JOIN StudentExamResults ser
+       ON ser.ExamId = e.Id
+      AND ser.Score IS NOT NULL
+      AND e.MaxScore > 0
+GROUP BY gs.GradeId, gs.SubjectId, sub.Name, g.Name
+ORDER BY gs.GradeId, sub.Name;
+
+
+-----------------------------------------------------------------------------
+5. NEXT 3 UPCOMING EXAMS
+-----------------------------------------------------------------------------
+Description:
+The soonest 3 exams scheduled from today onward, with subject and grade
+names resolved. Matches the "upcoming exams" widget on the dashboard.
+
+SELECT
+    e.Id            AS id,
+    e.Name           AS title,
+    COALESCE(sub.Name, 'Unknown subject') AS subjectName,
+    COALESCE(g.Name,   'Unknown grade')   AS gradeName,
+    e.ExamDate       AS examDate
+FROM Exams e
+LEFT JOIN Subjects sub ON sub.Id = e.SubjectId
+LEFT JOIN Grades   g   ON g.Id   = e.GradeId
+WHERE e.ExamDate IS NOT NULL
+  AND DATE(e.ExamDate) >= CURDATE()
+ORDER BY e.ExamDate
+LIMIT 3;
+
+
+-----------------------------------------------------------------------------
+6. TEACHER -> CLASS -> SUBJECT ASSIGNMENTS (DETAIL ROWS)
+-----------------------------------------------------------------------------
+Description:
+One row per teaching assignment, showing which teacher teaches which
+subject in which class/grade. Use this as the raw detail feed if you
+want to group/nest it yourself in the app; see query 7 for a
+pre-aggregated version.
+
+SELECT
+    t.Id             AS teacherId,
+    t.FullName       AS teacherName,
+    c.Id             AS classId,
+    c.Name           AS className,
+    g.Id             AS gradeId,
+    g.Name           AS gradeName,
+    g.Number         AS gradeNumber,
+    sub.Id           AS subjectId,
+    sub.Name         AS subjectName
+FROM TeachingAssignments ta
+JOIN Teachers t   ON t.Id  = ta.TeacherId
+JOIN Subjects sub ON sub.Id = ta.SubjectId
+JOIN Classes  c   ON c.Id  = ta.ClassId
+JOIN Grades   g   ON g.Id  = c.GradeId
+ORDER BY t.FullName, g.Number, c.Name;
+
+
+-----------------------------------------------------------------------------
+7. TEACHER WORKLOAD SUMMARY
+-----------------------------------------------------------------------------
+Description:
+Per-teacher rollup of how many distinct classes they teach and which
+subjects they cover (comma-separated). Good for a "teacher workload"
+table on the dashboard without needing to group the detail rows in code.
+
+SELECT
+    t.Id                                   AS teacherId,
+    t.FullName                             AS teacherName,
+    COUNT(DISTINCT c.Id)                   AS classCount,
+    GROUP_CONCAT(DISTINCT sub.Name ORDER BY sub.Name SEPARATOR ', ') AS subjects
+FROM TeachingAssignments ta
+JOIN Teachers t   ON t.Id  = ta.TeacherId
+JOIN Subjects sub ON sub.Id = ta.SubjectId
+JOIN Classes  c   ON c.Id  = ta.ClassId
+GROUP BY t.Id, t.FullName
+ORDER BY t.FullName;
+
+
+-----------------------------------------------------------------------------
+8. MONTHLY ATTENDANCE HEATMAP (STUDENTS & TEACHERS)
+-----------------------------------------------------------------------------
+Description:
+Day-by-day attendance percentages for the current calendar month, for
+both students and teachers. The student denominator is always the TOTAL
+number of students (not just the records that exist for that day) -
+this matches the app's own logic, since missing records should count
+against the percentage rather than be silently excluded. Requires
+MySQL 8.0+ for the recursive day-series CTE.
+
+WITH RECURSIVE days AS (
+    SELECT DATE_FORMAT(CURDATE(), '%Y-%m-01') AS d
+    UNION ALL
+    SELECT d + INTERVAL 1 DAY
+    FROM days
+    WHERE d + INTERVAL 1 DAY < DATE_FORMAT(CURDATE(), '%Y-%m-01') + INTERVAL 1 MONTH
+),
+totals AS (
+    SELECT (SELECT COUNT(*) FROM Students) AS studentTotal
+)
+SELECT
+    DATE_FORMAT(d.d, '%Y-%m-%d')                         AS `date`,
+    DAY(d.d)                                             AS `day`,
+    d.d > CURDATE()                                      AS isFuture,
+
+    COALESCE(sa.studentPresent, 0)                       AS studentPresent,
+    t.studentTotal                                       AS studentTotal,
+    ROUND(
+        CASE WHEN t.studentTotal > 0
+             THEN (COALESCE(sa.studentPresent, 0) / t.studentTotal) * 100
+             ELSE 0 END, 2)                               AS studentPercentage,
+
+    COALESCE(ta.teacherTotal, 0)                          AS teacherTotal,
+    COALESCE(ta.teacherPresent, 0)                        AS teacherPresent,
+    ROUND(
+        CASE WHEN COALESCE(ta.teacherTotal, 0) > 0
+             THEN (COALESCE(ta.teacherPresent, 0) / ta.teacherTotal) * 100
+             ELSE 0 END, 2)                               AS teacherPercentage
+FROM days d
+CROSS JOIN totals t
+LEFT JOIN (
+    SELECT Date, COUNT(*) AS studentPresent
+    FROM StudentAttendances
+    WHERE Status = 1
+    GROUP BY Date
+) sa ON sa.Date = d.d
+LEFT JOIN (
+    SELECT Date, COUNT(*) AS teacherTotal,
+           SUM(Status = 1) AS teacherPresent
+    FROM TeacherAttendances
+    GROUP BY Date
+) ta ON ta.Date = d.d
+ORDER BY d.d;
+
+
+-----------------------------------------------------------------------------
+9. STUDENT ATTENDANCE RATE RANKING (THIS MONTH)
+-----------------------------------------------------------------------------
+Description:
+Ranks students by their attendance rate for the current month, using
+only days that actually have a recorded status (excludes Unrecorded).
+Useful for flagging students with poor attendance on the dashboard.
+
+SELECT
+    s.Id                                          AS studentId,
+    s.FullName                                    AS studentName,
+    COUNT(sa.Id)                                  AS recordedDays,
+    SUM(sa.Status = 1)                            AS presentDays,
+    ROUND(
+        CASE WHEN COUNT(sa.Id) > 0
+             THEN (SUM(sa.Status = 1) / COUNT(sa.Id)) * 100
+             ELSE 0 END, 2)                        AS attendanceRate
+FROM Students s
+LEFT JOIN StudentAttendances sa
+       ON sa.StudentId = s.Id
+      AND sa.Date >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+      AND sa.Date <  DATE_FORMAT(CURDATE(), '%Y-%m-01') + INTERVAL 1 MONTH
+      AND sa.Status <> 0
+GROUP BY s.Id, s.FullName
+ORDER BY attendanceRate ASC, s.FullName;
+
+
+-----------------------------------------------------------------------------
+10. TEACHER ATTENDANCE RATE RANKING (THIS MONTH)
+-----------------------------------------------------------------------------
+Description:
+Same idea as query 9, but for teachers. Handy for HR/admin views that
+need to flag frequently-absent or late-arriving staff.
+
+SELECT
+    t.Id                                          AS teacherId,
+    t.FullName                                    AS teacherName,
+    COUNT(ta.Id)                                  AS recordedDays,
+    SUM(ta.Status = 1)                            AS presentDays,
+    SUM(ta.Status = 3)                            AS lateDays,
+    SUM(ta.Status = 2)                            AS absentDays,
+    ROUND(
+        CASE WHEN COUNT(ta.Id) > 0
+             THEN (SUM(ta.Status = 1) / COUNT(ta.Id)) * 100
+             ELSE 0 END, 2)                        AS attendanceRate
+FROM Teachers t
+LEFT JOIN TeacherAttendances ta
+       ON ta.TeacherId = t.Id
+      AND ta.Date >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+      AND ta.Date <  DATE_FORMAT(CURDATE(), '%Y-%m-01') + INTERVAL 1 MONTH
+      AND ta.Status <> 0
+GROUP BY t.Id, t.FullName
+ORDER BY attendanceRate ASC, t.FullName;
+
+
+-----------------------------------------------------------------------------
+11. TOP 10 STUDENTS BY OVERALL AVERAGE SCORE
+-----------------------------------------------------------------------------
+Description:
+Leaderboard of the 10 students with the highest average score (as a
+percentage of each exam's MaxScore) across all exams they have a
+recorded score for. Good for a "top performers" widget.
+
+SELECT
+    s.Id                                     AS studentId,
+    s.FullName                               AS studentName,
+    COUNT(ser.Id)                            AS examsTaken,
+    ROUND(AVG((ser.Score / e.MaxScore) * 100), 2) AS averageScorePercent
+FROM Students s
+JOIN StudentExamResults ser ON ser.StudentId = s.Id
+JOIN Exams e ON e.Id = ser.ExamId
+WHERE ser.Score IS NOT NULL
+  AND e.MaxScore > 0
+GROUP BY s.Id, s.FullName
+ORDER BY averageScorePercent DESC
+LIMIT 10;
+
+
+-----------------------------------------------------------------------------
+12. EXAM PASS/FAIL BREAKDOWN (50% THRESHOLD)
+-----------------------------------------------------------------------------
+Description:
+For every exam, shows how many students scored at or above 50% of
+MaxScore vs. below it, plus the class average. The 50% threshold is a
+placeholder - change the ">= 0.5" comparison to whatever passing mark
+your school uses.
+
+SELECT
+    e.Id                                          AS examId,
+    e.Name                                        AS examName,
+    sub.Name                                      AS subjectName,
+    g.Name                                        AS gradeName,
+    COUNT(ser.Id)                                 AS studentsGraded,
+    SUM(CASE WHEN ser.Score IS NOT NULL AND e.MaxScore > 0
+             AND (ser.Score / e.MaxScore) >= 0.5 THEN 1 ELSE 0 END) AS passCount,
+    SUM(CASE WHEN ser.Score IS NOT NULL AND e.MaxScore > 0
+             AND (ser.Score / e.MaxScore) <  0.5 THEN 1 ELSE 0 END) AS failCount,
+    ROUND(AVG((ser.Score / e.MaxScore) * 100), 2) AS averageScorePercent
+FROM Exams e
+JOIN Subjects sub ON sub.Id = e.SubjectId
+JOIN Grades   g   ON g.Id   = e.GradeId
+LEFT JOIN StudentExamResults ser
+       ON ser.ExamId = e.Id
+      AND ser.Score IS NOT NULL
+      AND e.MaxScore > 0
+GROUP BY e.Id, e.Name, sub.Name, g.Name
+ORDER BY e.ExamDate DESC;
+
+
+-----------------------------------------------------------------------------
+13. SUBJECTS NOT YET ASSIGNED TO ANY GRADE
+-----------------------------------------------------------------------------
+Description:
+Data-completeness check: lists subjects that exist in the Subjects
+table but have no row in GradeSubjects, meaning no grade can currently
+schedule an exam for them (ExamsController requires a GradeSubjects
+link before an exam can be created). Useful as an admin "setup gaps"
+panel.
+
+SELECT
+    sub.Id    AS subjectId,
+    sub.Name  AS subjectName
+FROM Subjects sub
+LEFT JOIN GradeSubjects gs ON gs.SubjectId = sub.Id
+WHERE gs.Id IS NULL
+ORDER BY sub.Name;
+
+
+-----------------------------------------------------------------------------
+14. CLASSES WITH ZERO ENROLLED STUDENTS
+-----------------------------------------------------------------------------
+Description:
+Lists every class that currently has no students assigned to it
+(Students.ClassId is nullable, so a class can legitimately be empty).
+Useful for spotting newly-created or under-used classes.
+
+SELECT
+    c.Id       AS classId,
+    c.Name     AS className,
+    g.Name     AS gradeName
+FROM Classes c
+JOIN Grades g ON g.Id = c.GradeId
+LEFT JOIN Students s ON s.ClassId = c.Id
+WHERE s.Id IS NULL
+ORDER BY g.Number, c.Name;
+
+
+-----------------------------------------------------------------------------
+15. STUDENTS NOT YET ASSIGNED TO A CLASS
+-----------------------------------------------------------------------------
+Description:
+Lists students whose ClassId is NULL - i.e. enrolled in the system but
+not placed into a class yet. Useful as an "onboarding queue" widget,
+since these students won't appear in any grade/class rollup above.
+
+SELECT
+    s.Id           AS studentId,
+    s.FullName     AS studentName,
+    s.Code         AS studentCode,
+    s.EnrollDate   AS enrollDate
+FROM Students s
+WHERE s.ClassId IS NULL
+ORDER BY s.EnrollDate;
+
+
+-----------------------------------------------------------------------------
+16. TODAY'S ATTENDANCE SNAPSHOT
+-----------------------------------------------------------------------------
+Description:
+Present/absent/late/excused/unrecorded counts for both students and
+teachers, for today only. Complements the monthly heatmap (query 8)
+with a fast, single-glance "right now" widget instead of a full month
+to scan.
+
+SELECT
+    'Students'                                          AS category,
+    SUM(sa.Status = 1)                                  AS present,
+    SUM(sa.Status = 2)                                  AS absent,
+    SUM(sa.Status = 3)                                  AS late,
+    SUM(sa.Status = 4)                                  AS excused,
+    (SELECT COUNT(*) FROM Students) - COUNT(sa.Id)      AS unrecorded
+FROM StudentAttendances sa
+WHERE sa.Date = CURDATE()
+UNION ALL
+SELECT
+    'Teachers',
+    SUM(ta.Status = 1),
+    SUM(ta.Status = 2),
+    SUM(ta.Status = 3),
+    SUM(ta.Status = 4),
+    (SELECT COUNT(*) FROM Teachers) - COUNT(ta.Id)
+FROM TeacherAttendances ta
+WHERE ta.Date = CURDATE();
+
+
+-----------------------------------------------------------------------------
+17. AVERAGE EXAM SCORE (%) PER CLASS
+-----------------------------------------------------------------------------
+Description:
+Same idea as query 4, but one level deeper - per individual class
+instead of per grade. Useful for comparing classes within the same
+grade against each other.
+
+SELECT
+    c.Id                                           AS classId,
+    c.Name                                         AS className,
+    g.Name                                         AS gradeName,
+    ROUND(AVG((ser.Score / e.MaxScore) * 100), 2)  AS averageScorePercent
+FROM Classes c
+JOIN Grades g ON g.Id = c.GradeId
+JOIN Students s ON s.ClassId = c.Id
+JOIN StudentExamResults ser ON ser.StudentId = s.Id
+JOIN Exams e ON e.Id = ser.ExamId
+WHERE ser.Score IS NOT NULL
+  AND e.MaxScore > 0
+GROUP BY c.Id, c.Name, g.Name, g.Number
+ORDER BY g.Number, c.Name;
+
+
+-----------------------------------------------------------------------------
+18. TEACHERS WITH NO TEACHING ASSIGNMENTS
+-----------------------------------------------------------------------------
+Description:
+Data-completeness check: teachers who exist in the system but have no
+row in TeachingAssignments, i.e. they aren't scheduled to teach
+anything yet. Companion to query 13 (subjects with no grade).
+
+SELECT
+    t.Id        AS teacherId,
+    t.FullName  AS teacherName
+FROM Teachers t
+LEFT JOIN TeachingAssignments ta ON ta.TeacherId = t.Id
+WHERE ta.Id IS NULL
+ORDER BY t.FullName;
+
+
+-----------------------------------------------------------------------------
+19. CLASSES WITH NO TEACHING ASSIGNMENTS
+-----------------------------------------------------------------------------
+Description:
+Classes that have no TeachingAssignments row at all - i.e. nobody is
+assigned to teach anything there, even if the class has enrolled
+students. A real operational gap worth surfacing on an admin panel.
+
+SELECT
+    c.Id       AS classId,
+    c.Name     AS className,
+    g.Name     AS gradeName
+FROM Classes c
+JOIN Grades g ON g.Id = c.GradeId
+LEFT JOIN TeachingAssignments ta ON ta.ClassId = c.Id
+WHERE ta.Id IS NULL
+ORDER BY g.Number, c.Name;
+
+
+-----------------------------------------------------------------------------
+20. STUDENTS NEVER GRADED
+-----------------------------------------------------------------------------
+Description:
+Students with zero rows in StudentExamResults - enrolled, but with no
+exam history recorded yet. Different from query 15 (unassigned to a
+class): a student here can already be in a class, just never
+enrolled/scored in any exam.
+
+SELECT
+    s.Id           AS studentId,
+    s.FullName     AS studentName,
+    s.Code         AS studentCode
+FROM Students s
+LEFT JOIN StudentExamResults ser ON ser.StudentId = s.Id
+WHERE ser.Id IS NULL
+ORDER BY s.FullName;
+
+
+-----------------------------------------------------------------------------
+21. RECENT EXAM RESULTS FEED
+-----------------------------------------------------------------------------
+Description:
+Latest 20 graded exam results across the whole school, for an
+"activity feed" style widget. NOTE: StudentExamResults has no
+CreatedAt/timestamp column in the current schema, so this orders by
+Id DESC as a proxy for insertion order (auto-increment PK) - it is not
+a true chronological timestamp. Add a CreatedAt column if you need a
+real audit trail.
+
+SELECT
+    ser.Id           AS resultId,
+    s.FullName       AS studentName,
+    e.Name           AS examName,
+    sub.Name         AS subjectName,
+    g.Name           AS gradeName,
+    ser.Score        AS score,
+    e.MaxScore       AS maxScore
+FROM StudentExamResults ser
+JOIN Students s   ON s.Id  = ser.StudentId
+JOIN Exams e      ON e.Id  = ser.ExamId
+JOIN Subjects sub ON sub.Id = e.SubjectId
+JOIN Grades g     ON g.Id  = e.GradeId
+WHERE ser.Score IS NOT NULL
+ORDER BY ser.Id DESC
+LIMIT 20;
+
+
+-----------------------------------------------------------------------------
+22. GRADE/SUBJECT LINKS WITH NO EXAM CREATED YET
+-----------------------------------------------------------------------------
+Description:
+Goes one step further than query 13: for every GradeSubjects link (a
+subject already assigned to a grade), checks whether any Exam has
+actually been created for that grade+subject pair. Flags subjects that
+are "set up" but never actually examined.
+
+SELECT
+    g.Id        AS gradeId,
+    g.Name      AS gradeName,
+    sub.Id      AS subjectId,
+    sub.Name    AS subjectName,
+    COUNT(e.Id) AS examCount
+FROM GradeSubjects gs
+JOIN Grades g     ON g.Id   = gs.GradeId
+JOIN Subjects sub ON sub.Id = gs.SubjectId
+LEFT JOIN Exams e ON e.GradeId = gs.GradeId AND e.SubjectId = gs.SubjectId
+GROUP BY g.Id, g.Name, sub.Id, sub.Name
+HAVING COUNT(e.Id) = 0
+ORDER BY g.Number, sub.Name;
+
+
+-----------------------------------------------------------------------------
+23. ROLLING 30-DAY STUDENT ATTENDANCE TREND
+-----------------------------------------------------------------------------
+Description:
+Same shape as the monthly heatmap (query 8) but a trailing 30-day
+window ending today, instead of resetting on the 1st of the calendar
+month. Usually more useful for a live "last month" trend chart.
+Requires MySQL 8.0+ for the recursive day-series CTE.
+
+WITH RECURSIVE days AS (
+    SELECT CURDATE() - INTERVAL 29 DAY AS d
+    UNION ALL
+    SELECT d + INTERVAL 1 DAY
+    FROM days
+    WHERE d + INTERVAL 1 DAY <= CURDATE()
+)
+SELECT
+    DATE_FORMAT(d.d, '%Y-%m-%d')                          AS `date`,
+    COALESCE(sa.presentCount, 0)                          AS studentsPresent,
+    (SELECT COUNT(*) FROM Students)                       AS studentsTotal,
+    ROUND(
+        COALESCE(sa.presentCount, 0)
+        / NULLIF((SELECT COUNT(*) FROM Students), 0) * 100, 2)  AS studentAttendancePercent
+FROM days d
+LEFT JOIN (
+    SELECT Date, COUNT(*) AS presentCount
+    FROM StudentAttendances
+    WHERE Status = 1
+    GROUP BY Date
+) sa ON sa.Date = d.d
+ORDER BY d.d;
+
+
+-----------------------------------------------------------------------------
+24. SCHOOL-WIDE PASS RATE KPI
+-----------------------------------------------------------------------------
+Description:
+Single aggregate number rolling up query 12: overall percentage of
+graded exam results that are at or above 50% of MaxScore, across the
+whole school. Good as a top-level KPI card. Change ">= 0.5" to match
+your school's real passing threshold.
+
+SELECT
+    COUNT(*)                                                          AS totalGradedResults,
+    SUM(CASE WHEN (ser.Score / e.MaxScore) >= 0.5 THEN 1 ELSE 0 END)  AS totalPass,
+    SUM(CASE WHEN (ser.Score / e.MaxScore) <  0.5 THEN 1 ELSE 0 END)  AS totalFail,
+    ROUND(
+        SUM(CASE WHEN (ser.Score / e.MaxScore) >= 0.5 THEN 1 ELSE 0 END)
+        / COUNT(*) * 100, 2)                                          AS passRatePercent
+FROM StudentExamResults ser
+JOIN Exams e ON e.Id = ser.ExamId
+WHERE ser.Score IS NOT NULL
+  AND e.MaxScore > 0;
+
+
+-----------------------------------------------------------------------------
+25. SINGLE-STUDENT TRANSCRIPT (PARAMETERIZED)
+-----------------------------------------------------------------------------
+Description:
+Full exam history for one student - the raw-SQL equivalent of
+ReportService.GetStudentTranscriptAsync, useful if you ever need a
+direct SQL fallback/report instead of going through the API. Replace
+the literal "1" in the WHERE clause with the target student's Id (or
+bind it as a parameter from your reporting tool).
+
+SELECT
+    e.Name                                     AS examName,
+    sub.Name                                   AS subjectName,
+    g.Name                                     AS gradeName,
+    e.ExamDate                                 AS examDate,
+    ser.Score                                  AS score,
+    e.MaxScore                                 AS maxScore,
+    ROUND((ser.Score / e.MaxScore) * 100, 2)   AS scorePercent,
+    ser.Notes                                  AS notes
+FROM StudentExamResults ser
+JOIN Exams e      ON e.Id  = ser.ExamId
+JOIN Subjects sub ON sub.Id = e.SubjectId
+JOIN Grades g     ON g.Id  = e.GradeId
+WHERE ser.StudentId = 1   -- replace with the target student's Id
+ORDER BY e.ExamDate;
