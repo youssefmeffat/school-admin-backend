@@ -3,6 +3,7 @@ using Application.DTOs;
 using Core.Models;
 using Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
+using System.Text.RegularExpressions;
 
 namespace Application.Services
 {
@@ -86,7 +87,14 @@ namespace Application.Services
                         "Enrollment date cannot be earlier than date of birth."));
             }
 
-            var code = student.Code.Trim();
+            var code = student.Code.Trim().ToUpperInvariant();
+
+            if (!Regex.IsMatch(code, @"^S\d{4}$"))
+            {
+                return ServiceResult<Student>.Fail(
+                    ServiceError.Validation(
+                        "Student code must follow the format S1234."));
+            }
 
             var codeTaken = await _db.Students
                 .AnyAsync(s => s.Code == code);
@@ -121,7 +129,14 @@ namespace Application.Services
                         "Enrollment date cannot be earlier than date of birth."));
             }
 
-            var code = updated.Code.Trim();
+            var code = updated.Code.Trim().ToUpperInvariant();
+
+            if (!Regex.IsMatch(code, @"^S\d{4}$"))
+            {
+                return ServiceResult.Fail(
+                    ServiceError.Validation(
+                        "Student code must follow the format S1234."));
+            }
 
             var codeTaken = await _db.Students
                 .AnyAsync(s =>
