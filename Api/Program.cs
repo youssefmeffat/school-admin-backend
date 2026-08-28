@@ -1,4 +1,3 @@
-
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -38,6 +37,24 @@ namespace Api
             builder.Services.AddScoped<Application.Services.ITeachingAssignmentsService, Application.Services.TeachingAssignmentsService>();
             builder.Services.AddScoped<Application.Services.IAttendanceService, Application.Services.AttendanceService>();
             builder.Services.AddScoped<Application.Services.IDashboardService, Application.Services.DashboardService>();
+
+            // Local Python Text2SQL service
+            builder.Services.AddHttpClient<Application.Services.IAiChatService, Application.Services.AiChatService>(
+                (serviceProvider, client) =>
+                {
+                    var configuration = serviceProvider.GetRequiredService<IConfiguration>();
+
+                    var baseUrl =
+                        configuration["Text2Sql:BaseUrl"]
+                        ?? "http://localhost:8000";
+
+                    var timeoutSeconds =
+                        configuration.GetValue<int?>("Text2Sql:TimeoutSeconds")
+                        ?? 180;
+
+                    client.BaseAddress = new Uri(baseUrl);
+                    client.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
+                });
 
             builder.Services.AddCors(options =>
             {

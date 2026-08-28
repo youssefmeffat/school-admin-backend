@@ -30,3 +30,48 @@ msbuild.wrn
 
 # Visual Studio 2015
 .vs/
+
+# -----------------------------
+# Python / Text2SQL backend
+# -----------------------------
+
+# Virtual environments
+backend-python/venv/
+backend-python/.venv/
+
+# Python cache / compiled files
+backend-python/__pycache__/
+backend-python/**/*.py[cod]
+backend-python/**/__pycache__/
+
+# Pytest / tooling caches
+backend-python/.pytest_cache/
+backend-python/.mypy_cache/
+backend-python/.ruff_cache/
+
+# Local environment / secrets
+backend-python/.env
+backend-python/.env.*
+!backend-python/.env.example
+
+# Uploaded / generated databases
+backend-python/uploads/
+backend-python/data/
+backend-python/*.db
+backend-python/*.sqlite
+backend-python/*.sqlite3
+
+# Fine-tuned adapters / generated model output
+backend-python/adapters/
+backend-python/checkpoints/
+backend-python/output/
+backend-python/outputs/
+
+# Hugging Face / model caches if stored locally in project
+backend-python/.cache/
+backend-python/huggingface/
+backend-python/models/
+
+# Logs
+backend-python/*.log
+backend-python/logs/

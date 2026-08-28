@@ -1,0 +1,255 @@
+"""
+text2sql FastAPI microservice.
+
+Wraps the `text2sql` package (extracted as-is from the notebook) behind a
+small HTTP API that the .NET backend calls:
+
+  POST /sessions/{session_id}/connect  {"connection_string": "..."} -> connects
+                                         the pipeline directly to that database
+                                         for that session
+  GET  /sessions/{session_id}/schema   -> learned schema / semantic profile
+  POST /sessions/{session_id}/ask      {"question": "..."} -> grounded answer
+  GET  /health                         liveness check
+
+Design choices that map directly to the "no errors shown to user / no
+hallucination" requirement:
+  - Every endpoint is wrapped so a pipeline exception never becomes a raw
+    500 with a stack trace -- it's translated into a normal JSON response
+    with success=False and a plain-language message.
+  - PipelineConfig.graceful_failure=True (the package default) means the
+    pipeline itself already returns a "couldn't find/answer that" result
+    instead of raising when SQL generation/repair is exhausted.
+  - Answers are always synthesized from the actual executed rows
+    (answer.py) -- never from the model's own unconstrained knowledge --
+    which is what keeps this "grounded" rather than free-form generation.
+    This reduces hallucination; it cannot make it strictly impossible,
+    and the README explains that honestly.
+"""
+import os
+import traceback
+from typing import Dict, Optional
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from text2sql import PipelineConfig, Text2SQLPipeline
+from text2sql.exceptions import Text2SQLError
+
+LLM_MODEL = os.environ.get("T2S_LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+LLM_4BIT = os.environ.get("T2S_LLM_4BIT", "false").lower() == "true"
+
+app = FastAPI(title="text2sql-service", version="1.0.0")
+
+# The .NET API is the only intended caller; CORS is wide here for local dev
+# and should be locked down to the .NET service's origin in production.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# session_id -> {"pipeline": Text2SQLPipeline, "connection_string": str, "tables": [...]}
+_SESSIONS: Dict[str, dict] = {}
+
+
+def _normalize_connection_string(raw: str) -> str:
+    """Accepts either a ready-made SQLAlchemy URL (postgresql+psycopg2://...,
+    mysql+pymysql://..., mssql+pyodbc://..., sqlite:///...) or an ADO.NET
+    / ODBC style string such as:
+
+        "Server=host;Database=name;Uid=user;Pwd=pass;CharSet=utf8;"
+
+    and turns the latter into a SQLAlchemy URL. Defaults to the MySQL
+    dialect (pymysql) since Uid/Pwd/CharSet is the classic MySQL
+    connector key set; pass a full "dialect+driver://" URL directly if you
+    need Postgres/MSSQL/etc.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        raise ValueError("Connection string is empty.")
+
+    if "://" in raw:
+        # Already a SQLAlchemy-style URL -- use as-is.
+        return raw
+
+    parts: Dict[str, str] = {}
+    for chunk in raw.split(";"):
+        chunk = chunk.strip()
+        if not chunk or "=" not in chunk:
+            continue
+        key, value = chunk.split("=", 1)
+        parts[key.strip().lower()] = value.strip()
+
+    server = parts.get("server") or parts.get("host")
+    database = parts.get("database") or parts.get("initial catalog")
+    uid = parts.get("uid") or parts.get("user") or parts.get("user id") or ""
+    pwd = parts.get("pwd") or parts.get("password") or ""
+    port = parts.get("port") or "3306"
+    charset = parts.get("charset")
+
+    if not server or not database:
+        raise ValueError(
+            "Connection string must include at least Server and Database "
+            "(e.g. 'Server=host;Database=name;Uid=user;Pwd=pass;CharSet=utf8;')."
+        )
+
+    from urllib.parse import quote_plus
+
+    url = f"mysql+pymysql://{quote_plus(uid)}:{quote_plus(pwd)}@{server}:{port}/{database}"
+    if charset:
+        url += f"?charset={charset}"
+    return url
+
+
+def _connect_pipeline(session_id: str, connection_string: str, enable_semantic_learning: bool = True):
+    config = PipelineConfig(
+        connection_string=connection_string,
+        llm_model=LLM_MODEL,
+        llm_load_in_4bit=LLM_4BIT,
+    )
+    pipeline = Text2SQLPipeline(config)
+    pipeline.warm_up()
+    metadata = pipeline.learn_schema()
+    _SESSIONS[session_id] = {
+        "pipeline": pipeline,
+        "connection_string": connection_string,
+        "tables": list(metadata.tables.keys()),
+    }
+    return metadata
+
+
+def _get_session(session_id: str) -> dict:
+    session = _SESSIONS.get(session_id)
+    if session is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No database connected for this session yet. Connect a database first.",
+        )
+    return session
+
+
+class AskRequest(BaseModel):
+    question: str
+    conversation_context: Optional[str] = None
+
+
+class ConnectRequest(BaseModel):
+    connection_string: str
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/sessions/{session_id}/connect")
+async def connect(session_id: str, request: ConnectRequest):
+    try:
+        connection_string = _normalize_connection_string(request.connection_string)
+        metadata = _connect_pipeline(session_id, connection_string)
+
+        return {
+            "success": True,
+            "session_id": session_id,
+            "tables": list(metadata.tables.keys()),
+            "message": f"Connected. Learned {len(metadata.tables)} table(s).",
+        }
+    except Text2SQLError as exc:
+        raise HTTPException(status_code=422, detail=f"Could not learn this database: {exc}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=f"Connection failed: {exc}")
+
+
+@app.get("/sessions/{session_id}/schema")
+def get_schema(session_id: str):
+    session = _get_session(session_id)
+    pipeline = session["pipeline"]
+    profile = {}
+    for table_name, table_profile in pipeline.semantic_profile.items():
+        profile[table_name] = {
+            "role": table_profile.role,
+            "columns": {
+                col_name: {
+                    "semantic_type": col_profile.semantic_type,
+                    "sample_values": getattr(col_profile, "sample_values", None),
+                }
+                for col_name, col_profile in table_profile.columns.items()
+            },
+        }
+    return {"tables": session["tables"], "profile": profile}
+
+
+@app.post("/sessions/{session_id}/ask")
+def ask(session_id: str, request: AskRequest):
+    session = _get_session(session_id)
+    pipeline: Text2SQLPipeline = session["pipeline"]
+
+    question = (request.question or "").strip()
+    if not question:
+        return {
+            "success": False,
+            "answer": "Please type a question about your data.",
+            "sql": None,
+            "rows": [],
+        }
+
+    try:
+        result = pipeline.ask(question, conversation_context=request.conversation_context)
+        rows = [] if result.dataframe is None or result.dataframe.empty else result.dataframe.head(200).to_dict(orient="records")
+        return {
+            "success": bool(result.success),
+            "answer": result.answer,
+            "sql": result.sql,
+            "tables_used": getattr(result, "tables_used", []),
+            "rows": rows,
+            "repair_attempts": getattr(result, "repair_attempts", 0),
+        }
+    except Exception as exc:  # noqa: BLE001
+        # graceful_failure=True (pipeline default) already catches almost
+        # everything internally and returns success=False instead of
+        # raising. This is the last-resort safety net so that even a bug
+        # in the pipeline itself never surfaces a stack trace to the user.
+        traceback.print_exc()
+        return {
+            "success": False,
+            "answer": "I couldn't process that question against your data. Try rephrasing it, "
+                      "or ask something simpler first (e.g. \"what tables are available?\").",
+            "sql": None,
+            "rows": [],
+            "error": str(exc),
+        }
+
+
+@app.post("/sessions/{session_id}/finetune")
+def finetune(session_id: str, num_epochs: int = 3):
+    """Kicks off the notebook's LoRA fine-tune on this session's schema.
+    Synchronous and can take minutes -- call from a background job in
+    production; exposed here as a direct endpoint for simplicity."""
+    session = _get_session(session_id)
+    pipeline: Text2SQLPipeline = session["pipeline"]
+    try:
+        result = pipeline.finetune_on_data(num_epochs=num_epochs)
+        return {
+            "success": True,
+            "adapter_path": result.adapter_path,
+            "num_examples": result.num_examples,
+            "reused_cached_adapter": result.reused_cached_adapter,
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"Fine-tuning unavailable: {exc}")
+
+
+@app.delete("/sessions/{session_id}")
+def close_session(session_id: str):
+    session = _SESSIONS.pop(session_id, None)
+    if session:
+        try:
+            session["pipeline"].close()
+        except Exception:
+            pass
+    return {"success": True}

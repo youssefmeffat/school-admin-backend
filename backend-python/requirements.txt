@@ -1,0 +1,23 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+sqlalchemy==2.0.35
+transformers==4.44.2
+torch==2.4.1
+accelerate==0.34.2
+rank_bm25==0.2.2
+sqlglot==25.24.5
+peft==0.13.0
+datasets==2.21.0
+openpyxl==3.1.5
+pyarrow==17.0.0
+pandas==2.2.2
+hf_transfer==0.1.8
+# Optional (uncomment as needed):
+# faiss-cpu
+# sentence-transformers
+# bitsandbytes
+# psycopg2-binary
+ pymysql
+# pyodbc
+# snowflake-sqlalchemy
